@@ -1,0 +1,8 @@
+--- 
+region: ap-south-1
+instance_type: t2.micro
+ami: ami-02d55cb47e83a99a0 
+app_code_user: "ubuntu" # remote user
+env: demo
+counter: 0
+pem_key: mumbai-ak # key.pem

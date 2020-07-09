@@ -1,0 +1,106 @@
+---
+- name: Ec2 instance with elb 
+  hosts: localhost 
+  # include_vars: "group_vars/vars.yml"
+  connection: local
+  gather_facts: False
+  tasks:
+    - name: Create security group
+      ec2_group:
+        name: "draup_security_group"
+        description: "draup security group"
+        region: "{{ region }}"
+        rules:
+          - proto: tcp  # ssh
+            from_port: 22
+            to_port: 22
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp  # http
+            from_port: 80
+            to_port: 80
+            cidr_ip: 0.0.0.0/0
+        rules_egress:
+          - proto: all
+            cidr_ip: 0.0.0.0/0
+      register: draup_firewall
+
+    - name: Create an EC2 instance
+      ec2:
+        key_name: "{{ pem_key }}"
+        region: "{{ region }}"
+        group_id: "{{ draup_firewall.group_id }}"
+        instance_type: "{{ instance_type }}"
+        image: "{{ ami }}"
+        wait: yes
+        instance_tags:
+            env: "{{ env }}"
+        count_tag: env
+        exact_count: 2
+        vpc_subnet_id: "{{ subnet }}"
+        assign_public_ip: yes
+      register: instance
+
+    - name: wait for the servers to appear on the network
+      wait_for: host={{ item.public_dns_name }} port=22 delay=10 timeout=180 state=started
+      with_items: "{{ instance.tagged_instances }}"
+
+    - name: add server ip addresses to hosts group
+      add_host: hostname={{ item.public_ip }} groupname=launched
+      with_items: "{{ instance.tagged_instances }}"
+
+    
+- hosts: launched
+  remote_user: ubuntu
+  become: True
+  vars:
+    HOST_COUNT: "{{ ansible_play_hosts | length }}"
+  tasks:
+    - name: Increment variable
+      set_fact: counter={{ counter | int + 1 }}
+    - debug:
+        msg: "{{ counter }}"
+    - name: Install nginx
+      apt:
+        name: nginx
+        state: present
+    - name: Create default index page
+      copy:
+        dest: /var/www/html/index.html
+        content: "<center><img src='https://cdn.pixabay.com/photo/2015/04/23/22/00/tree-736885__340.jpg' ><br><br>Hello from EC2 Instance{{ counter | int }} server IP: {{ inventory_hostname }} </center>"
+    - name: Restart nginx
+      service:
+        name: nginx
+        state: restarted
+    
+    
+
+- name: spin up the load balancer and add the servers to it
+  hosts: 127.0.0.1
+  connection: local
+  gather_facts: False
+  tasks:
+    - name: create a simple load balancer
+      ec2_elb_lb:
+        name: aws-elb-draup
+        state: present
+        region: ap-south-1
+        zones:
+          - ap-south-1a
+        listeners:
+          - protocol: http
+            load_balancer_port: 80
+            instance_port: 80
+      register: elb_details
+    
+    - name: add ec2 instances to the load balancer
+      local_action: ec2_elb
+      args:
+        instance_id: "{{ item.id }}"
+        ec2_elbs: aws-elb-draup
+        state: present
+        region: ap-south-1
+      with_items: "{{ instance.tagged_instances }}"
+  
+    - debug:
+        msg: "New ELB Endpoint : {{ elb_details.elb.dns_name }}"
+    
